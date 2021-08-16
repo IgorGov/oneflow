@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+    - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+env:
+  RELEASE_CANDIDATE: release-candidate
+  STABLE: stable
+  GKE_CLUSTER: prod-cluster
+  GKE_ZONE: europe-west1-b
+  GKE_NAMESPACE: k8s-namespace
+  DEPLOYMENT_NAME: deployment-name
+
+jobs:
+  push-tag:
+    name: Tag image as stable
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Declare git variables
+        id: vars
+        shell: bash
+        run: |
+          echo "TAG_VALUE=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          echo "COMMIT_SHA=$(git show-ref ${{ env.TAG_VALUE }} --hash)" >> $GITHUB_ENV
+          echo "GCR_IMAGE_PATH=gcr.io/${{ secrets.GOOGLE_PROJECT_ID }}/${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@master
+        with:
+          service_account_key: ${{ secrets.GCR_JSON_KEY }}
+          export_default_credentials: true
+
+      - run: |
+          gcloud container images add-tag "$GCR_IMAGE_PATH"/"$RELEASE_CANDIDATE":"$COMMIT_SHA" \
+            "$GCR_IMAGE_PATH"/"$STABLE":latest \
+            "$GCR_IMAGE_PATH"/"$STABLE":"$COMMIT_SHA" \
+            "$GCR_IMAGE_PATH"/"$STABLE":"$TAG_VALUE"
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@master
+        with:
+          service_account_key: ${{ secrets.GCR_JSON_KEY }}
+          project_id: ${{ secrets.GOOGLE_PROJECT_ID }}
+
+      - name: Get the GKE credentials (so it will possible to deploy to the cluster)
+        run: gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE"
+
+      - name: Rollout restart deployment
+        run: kubectl rollout restart deployment/"$DEPLOYMENT_NAME" -n "$GKE_NAMESPACE"
+

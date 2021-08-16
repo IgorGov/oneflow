@@ -1,0 +1,67 @@
+name: Build, publish and deploy
+
+on:
+  push:
+    branches:
+      - 'develop'
+      - 'hotfix/*'
+
+env:
+  RELEASE_CANDIDATE: release-candidate
+  GKE_CLUSTER: staging-cluster
+  GKE_ZONE: europe-west1-b
+  GKE_NAMESPACE: k8s-namespace
+  DEPLOYMENT_NAME: deployment-name
+
+jobs:
+  build-publish-deploy:
+    name: Build publish deploy image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Declare git variables
+        run: |
+          echo "COMMIT_SHA=${GITHUB_SHA}" >> $GITHUB_ENV
+          echo "BRANCH=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          echo "GCR_IMAGE_PATH=gcr.io/${{ secrets.GOOGLE_PROJECT_ID }}/${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
+
+        # needed if privates repos in requirements.txt
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: "GitHub.com"
+          name: id_rsa
+
+      - name: Build docker image
+        run: |
+          docker build -t "$GCR_IMAGE_PATH"/"$BRANCH" \
+            -t "$GCR_IMAGE_PATH"/"$BRANCH":"$COMMIT_SHA" \
+            --build-arg SSH_PRIVATE_KEY="$(cat ~/.ssh/id_rsa)" .
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@master
+        with:
+          service_account_key: ${{ secrets.GCR_JSON_KEY }}
+          project_id: ${{ secrets.GOOGLE_PROJECT_ID }}
+
+      - name: Configure docker to use the gcloud command-line tool as a credential helper
+        run: gcloud auth configure-docker -q
+
+      - name: Push docker to gcr
+        run: docker push "$GCR_IMAGE_PATH"/"$BRANCH" --all-tags
+
+      - name: Add release candidate tag
+        run: |
+          gcloud container images add-tag "$GCR_IMAGE_PATH"/"$BRANCH":"$COMMIT_SHA" \
+            "$GCR_IMAGE_PATH"/"$RELEASE_CANDIDATE":"$COMMIT_SHA"
+
+      - name: Get the GKE credentials (so it will possible to deploy to the cluster)
+        run: gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE"
+
+      - name: Rollout restart deployment
+        if: github.ref == 'refs/heads/develop'
+        run: kubectl rollout restart deployment/"$DEPLOYMENT_NAME" -n "$GKE_NAMESPACE"
